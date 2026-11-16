@@ -1,0 +1,174 @@
+name: Build AuraLedger (verifikasi + APK Android)
+
+# APK dibuat sebagai Trusted Web Activity (TWA): membuka situs AuraLedger Anda (HTTPS) memakai Chrome,
+# sehingga login Google tetap berfungsi. Server HARUS sudah ter-deploy lebih dulu.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      host:
+        description: 'Domain aplikasi tanpa https:// (contoh: ledger.domainanda.com)'
+        required: false
+      package_id:
+        description: 'Android package ID'
+        required: false
+        default: 'id.auraledger.app'
+
+permissions:
+  contents: read
+
+jobs:
+  verifikasi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Periksa sintaks server, JavaScript aplikasi, manifest, dan ikon
+        run: |
+          node --check server.js
+          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'));JSON.parse(require('fs').readFileSync('public/manifest.webmanifest','utf8'))"
+          test -s public/sw.js && grep -q "addEventListener('fetch'" public/sw.js || { echo '::error::public/sw.js kosong atau tanpa handler fetch'; exit 1; }
+          python3 - <<'PY'
+          import json, pathlib, sys
+          h = pathlib.Path('public/index.html').read_text(encoding='utf-8')
+          a = h.index('<script>\n(() =>') + 8
+          b = h.rindex('</script>')
+          body = h[a:b]
+          if '</script>' in body:
+              sys.exit('Ada </script> di dalam JavaScript: halaman akan rusak di browser')
+          pathlib.Path('/tmp/app.js').write_text(body, encoding='utf-8')
+          m = json.load(open('public/manifest.webmanifest', encoding='utf-8'))
+          for i in m['icons']:
+              assert pathlib.Path('public', i['src']).exists(), 'ikon hilang: ' + i['src']
+          json.load(open('public/.well-known/assetlinks.json', encoding='utf-8'))
+          PY
+          node --check /tmp/app.js
+
+  keamanan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Audit dependensi (gagal bila ada kerentanan tinggi/kritis)
+        run: |
+          npm install --omit=dev --ignore-scripts
+          npm audit --omit=dev --audit-level=high
+      - name: Tidak boleh ada atribut event inline atau eval di aplikasi
+        run: |
+          ! grep -nE '\son(click|change|input|submit|error|load)=' public/index.html
+          ! grep -nE '\beval\(|new Function\(' public/index.html
+
+  android:
+    needs: verifikasi
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HOST: ${{ inputs.host || vars.APP_HOST }}
+      PACKAGE_ID: ${{ inputs.package_id || vars.APP_PACKAGE_ID || 'id.auraledger.app' }}
+      KS_ALIAS: auraledger
+      KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validasi konfigurasi dan situs yang sudah ter-deploy
+        run: |
+          [ -n "$HOST" ] || { echo "::error::Isi input 'host' atau variabel repo APP_HOST (mis. ledger.domainanda.com)"; exit 1; }
+          case "$HOST" in http*|*/*) echo "::error::HOST harus domain saja, tanpa https:// dan tanpa /"; exit 1;; esac
+          { [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; } || { echo "::error::Secret ANDROID_KEYSTORE_BASE64 dan ANDROID_KEYSTORE_PASSWORD belum diisi (lihat README)"; exit 1; }
+          for p in health manifest.webmanifest icon-512.png; do
+            curl -fsS --max-time 20 "https://$HOST/$p" -o /dev/null || { echo "::error::https://$HOST/$p tidak dapat diakses. Deploy server lebih dulu."; exit 1; }
+          done
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Pasang Bubblewrap dan atur lokasi JDK/SDK
+        run: |
+          npm install -g @bubblewrap/cli@1
+          mkdir -p "$HOME/.bubblewrap"
+          printf '{"jdkPath":"%s","androidSdkPath":"%s"}' "$JAVA_HOME" "$ANDROID_HOME" > "$HOME/.bubblewrap/config.json"
+
+      - name: Siapkan keystore dan twa-manifest.json
+        run: |
+          mkdir -p twa
+          echo "$KS_B64" | base64 -d > twa/android.keystore
+          case "$GITHUB_REF" in refs/tags/v*) VN="${GITHUB_REF_NAME#v}";; *) VN="1.0.${GITHUB_RUN_NUMBER}";; esac
+          cat > twa/twa-manifest.json <<EOF
+          {
+            "packageId": "${PACKAGE_ID}",
+            "host": "${HOST}",
+            "name": "AuraLedger",
+            "launcherName": "AuraLedger",
+            "display": "standalone",
+            "orientation": "default",
+            "themeColor": "#17110E",
+            "themeColorDark": "#17110E",
+            "navigationColor": "#17110E",
+            "navigationColorDark": "#17110E",
+            "navigationDividerColor": "#17110E",
+            "navigationDividerColorDark": "#17110E",
+            "backgroundColor": "#17110E",
+            "enableNotifications": false,
+            "startUrl": "/",
+            "iconUrl": "https://${HOST}/icon-512.png",
+            "maskableIconUrl": "https://${HOST}/icon-512.png",
+            "splashScreenFadeOutDuration": 300,
+            "signingKey": { "path": "./android.keystore", "alias": "${KS_ALIAS}" },
+            "appVersionName": "${VN}",
+            "appVersionCode": ${GITHUB_RUN_NUMBER},
+            "shortcuts": [],
+            "generatorApp": "bubblewrap-cli",
+            "webManifestUrl": "https://${HOST}/manifest.webmanifest",
+            "fallbackType": "customtabs",
+            "features": {},
+            "alphaDependencies": { "enabled": false },
+            "enableSiteSettingsShortcut": true,
+            "isChromeOSOnly": false,
+            "isMetaQuest": false,
+            "fullScopeUrl": "https://${HOST}/",
+            "minSdkVersion": 21
+          }
+          EOF
+          python3 -m json.tool twa/twa-manifest.json > /dev/null
+
+      - name: Bangun proyek Android dan APK
+        working-directory: twa
+        env:
+          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          BUBBLEWRAP_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          bubblewrap update --skipVersionUpgrade
+          bubblewrap build --skipPwaValidation
+          ls -la *.apk *.aab
+
+      - name: Ringkasan sidik jari untuk assetlinks.json
+        working-directory: twa
+        run: |
+          FP=$(keytool -list -v -keystore android.keystore -alias "$KS_ALIAS" -storepass "$KS_PASS" | awk '/SHA256:/{print $2; exit}')
+          {
+            echo "### Langkah wajib agar APK tampil layar penuh (tanpa bilah alamat)"
+            echo "Isi \`public/.well-known/assetlinks.json\` di server dengan JSON berikut, lalu deploy ulang:"
+            echo '```json'
+            echo "[{\"relation\":[\"delegate_permission/common.handle_all_urls\"],\"target\":{\"namespace\":\"android_app\",\"package_name\":\"${PACKAGE_ID}\",\"sha256_cert_fingerprints\":[\"${FP}\"]}}]"
+            echo '```'
+            echo "Jika memakai Google Play App Signing, pakai sidik jari kunci penandatanganan dari Play Console."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auraledger-android
+          path: |
+            twa/app-release-signed.apk
+            twa/app-release-bundle.aab
+          retention-days: 30
+          if-no-files-found: error
