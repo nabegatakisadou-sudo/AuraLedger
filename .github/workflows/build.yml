@@ -8,12 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       host:
-        description: 'Domain aplikasi tanpa https:// (contoh: ledger.domainanda.com)'
+        description: 'Domain tanpa https:// (kosongkan untuk memakai AKUN.github.io)'
         required: false
       start_path:
-        description: 'Folder situs bila bukan di akar domain (contoh GitHub Pages: /AuraLedger/)'
+        description: 'Folder situs (kosongkan untuk GitHub Pages proyek; isi / bila situs ada di akar domain)'
         required: false
-        default: '/'
+        default: ''
       package_id:
         description: 'Android package ID'
         required: false
@@ -107,8 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
-      HOST: ${{ inputs.host || vars.APP_HOST }}
-      START_PATH: ${{ inputs.start_path || vars.APP_START_PATH || '/' }}
+      HOST: ${{ inputs.host || vars.APP_HOST || format('{0}.github.io', github.repository_owner) }}
+      START_PATH: ${{ inputs.start_path || vars.APP_START_PATH || format('/{0}/', github.event.repository.name) }}
       PACKAGE_ID: ${{ inputs.package_id || vars.APP_PACKAGE_ID || 'id.auraledger.app' }}
       KS_ALIAS: auraledger
       KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
