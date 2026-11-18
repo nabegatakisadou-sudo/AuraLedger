@@ -10,6 +10,10 @@ on:
       host:
         description: 'Domain aplikasi tanpa https:// (contoh: ledger.domainanda.com)'
         required: false
+      start_path:
+        description: 'Folder situs bila bukan di akar domain (contoh GitHub Pages: /AuraLedger/)'
+        required: false
+        default: '/'
       package_id:
         description: 'Android package ID'
         required: false
@@ -104,6 +108,7 @@ jobs:
     timeout-minutes: 40
     env:
       HOST: ${{ inputs.host || vars.APP_HOST }}
+      START_PATH: ${{ inputs.start_path || vars.APP_START_PATH || '/' }}
       PACKAGE_ID: ${{ inputs.package_id || vars.APP_PACKAGE_ID || 'id.auraledger.app' }}
       KS_ALIAS: auraledger
       KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -111,13 +116,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validasi konfigurasi dan situs yang sudah ter-deploy
+      - name: Validasi konfigurasi dan situs yang sudah online
         run: |
-          [ -n "$HOST" ] || { echo "::error::Isi input 'host' atau variabel repo APP_HOST (mis. ledger.domainanda.com)"; exit 1; }
+          [ -n "$HOST" ] || { echo "::error::Isi input 'host' (mis. akun.github.io) atau variabel repo APP_HOST. Situs harus sudah online di HTTPS."; exit 1; }
           case "$HOST" in http*|*/*) echo "::error::HOST harus domain saja, tanpa https:// dan tanpa /"; exit 1;; esac
-          { [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; } || { echo "::error::Secret ANDROID_KEYSTORE_BASE64 dan ANDROID_KEYSTORE_PASSWORD belum diisi (lihat README)"; exit 1; }
-          for p in health manifest.webmanifest icon-512.png; do
-            curl -fsS --max-time 20 "https://$HOST/$p" -o /dev/null || { echo "::error::https://$HOST/$p tidak dapat diakses. Deploy server lebih dulu."; exit 1; }
+          SP="$START_PATH"; case "$SP" in /*) ;; *) SP="/$SP";; esac; case "$SP" in */) ;; *) SP="$SP/";; esac
+          echo "SP=$SP" >> "$GITHUB_ENV"
+          for p in manifest.webmanifest icon-512.png; do
+            curl -fsS --max-time 20 "https://$HOST$SP$p" -o /dev/null || { echo "::error::https://$HOST$SP$p tidak dapat diakses. Terbitkan situsnya lebih dulu (workflow Pages) lalu periksa input host dan start_path."; exit 1; }
           done
 
       - uses: actions/setup-java@v4
@@ -133,10 +139,19 @@ jobs:
           mkdir -p "$HOME/.bubblewrap"
           printf '{"jdkPath":"%s","androidSdkPath":"%s"}' "$JAVA_HOME" "$ANDROID_HOME" > "$HOME/.bubblewrap/config.json"
 
-      - name: Siapkan keystore dan twa-manifest.json
+      - name: Siapkan kunci penandatangan dan twa-manifest.json
         run: |
           mkdir -p twa
-          echo "$KS_B64" | base64 -d > twa/android.keystore
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then
+            echo "$KS_B64" | base64 -d > twa/android.keystore
+            PW="$KS_PASS"; echo "GENERATED=0" >> "$GITHUB_ENV"
+          else
+            PW=$(openssl rand -hex 12); echo "::add-mask::$PW"
+            keytool -genkeypair -v -keystore twa/android.keystore -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -storepass "$PW" -keypass "$PW" -dname "CN=AuraLedger, O=AuraLedger, C=ID" > /dev/null 2>&1
+            printf 'SIMPAN BERKAS INI DI TEMPAT AMAN.\nKata sandi keystore: %s\nAlias: %s\nAgar pembaruan aplikasi memakai kunci yang sama, jadikan secret ANDROID_KEYSTORE_PASSWORD = kata sandi ini dan ANDROID_KEYSTORE_BASE64 = isi base64 dari android.keystore.\n' "$PW" "$KS_ALIAS" > twa/SIMPAN-INI-kunci-penandatangan.txt
+            echo "GENERATED=1" >> "$GITHUB_ENV"
+          fi
+          echo "::add-mask::$PW"; echo "KSPW=$PW" >> "$GITHUB_ENV"
           case "$GITHUB_REF" in refs/tags/v*) VN="${GITHUB_REF_NAME#v}";; *) VN="1.0.${GITHUB_RUN_NUMBER}";; esac
           cat > twa/twa-manifest.json <<EOF
           {
@@ -154,23 +169,23 @@ jobs:
             "navigationDividerColorDark": "#17110E",
             "backgroundColor": "#17110E",
             "enableNotifications": false,
-            "startUrl": "/",
-            "iconUrl": "https://${HOST}/icon-512.png",
-            "maskableIconUrl": "https://${HOST}/icon-512.png",
+            "startUrl": "${SP}",
+            "iconUrl": "https://${HOST}${SP}icon-512.png",
+            "maskableIconUrl": "https://${HOST}${SP}icon-512.png",
             "splashScreenFadeOutDuration": 300,
             "signingKey": { "path": "./android.keystore", "alias": "${KS_ALIAS}" },
             "appVersionName": "${VN}",
             "appVersionCode": ${GITHUB_RUN_NUMBER},
             "shortcuts": [],
             "generatorApp": "bubblewrap-cli",
-            "webManifestUrl": "https://${HOST}/manifest.webmanifest",
+            "webManifestUrl": "https://${HOST}${SP}manifest.webmanifest",
             "fallbackType": "customtabs",
             "features": {},
             "alphaDependencies": { "enabled": false },
             "enableSiteSettingsShortcut": true,
             "isChromeOSOnly": false,
             "isMetaQuest": false,
-            "fullScopeUrl": "https://${HOST}/",
+            "fullScopeUrl": "https://${HOST}${SP}",
             "minSdkVersion": 21
           }
           EOF
@@ -179,24 +194,26 @@ jobs:
       - name: Bangun proyek Android dan APK
         working-directory: twa
         env:
-          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          BUBBLEWRAP_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ env.KSPW }}
+          BUBBLEWRAP_KEY_PASSWORD: ${{ env.KSPW }}
         run: |
           bubblewrap update --skipVersionUpgrade
           bubblewrap build --skipPwaValidation
           ls -la *.apk *.aab
 
-      - name: Ringkasan sidik jari untuk assetlinks.json
+      - name: Ringkasan hasil
         working-directory: twa
         run: |
-          FP=$(keytool -list -v -keystore android.keystore -alias "$KS_ALIAS" -storepass "$KS_PASS" | awk '/SHA256:/{print $2; exit}')
+          FP=$(keytool -list -v -keystore android.keystore -alias "$KS_ALIAS" -storepass "$KSPW" | awk '/SHA256:/{print $2; exit}')
           {
-            echo "### Langkah wajib agar APK tampil layar penuh (tanpa bilah alamat)"
-            echo "Isi \`public/.well-known/assetlinks.json\` di server dengan JSON berikut, lalu deploy ulang:"
+            echo "### APK siap diunduh dari bagian Artifacts di bawah halaman ini"
+            [ "$GENERATED" = "1" ] && echo "Kunci penandatangan BARU dibuat otomatis. Unduh juga artifact **kunci-penandatangan-SIMPAN** dan simpan baik-baik (dibutuhkan untuk pembaruan berikutnya)."
+            echo "Situs: https://${HOST}${SP}"
+            echo ""
+            echo "Agar tampil layar penuh tanpa bilah alamat, domain harus menyajikan /.well-known/assetlinks.json di akarnya (butuh domain sendiri atau repo akun.github.io). Pada GitHub Pages proyek biasa, aplikasi tetap berjalan tetapi bilah alamat kecil tetap tampil."
             echo '```json'
             echo "[{\"relation\":[\"delegate_permission/common.handle_all_urls\"],\"target\":{\"namespace\":\"android_app\",\"package_name\":\"${PACKAGE_ID}\",\"sha256_cert_fingerprints\":[\"${FP}\"]}}]"
             echo '```'
-            echo "Jika memakai Google Play App Signing, pakai sidik jari kunci penandatanganan dari Play Console."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -207,3 +224,12 @@ jobs:
             twa/app-release-bundle.aab
           retention-days: 30
           if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: env.GENERATED == '1'
+        with:
+          name: kunci-penandatangan-SIMPAN
+          path: |
+            twa/android.keystore
+            twa/SIMPAN-INI-kunci-penandatangan.txt
+          retention-days: 90
