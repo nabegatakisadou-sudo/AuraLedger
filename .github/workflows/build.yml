@@ -26,7 +26,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Temukan folder proyek (akar, subfolder, atau isi berkas zip)
+        run: |
+          P=""
+          [ -f server.js ] && P="."
+          if [ -z "$P" ]; then f=$(find . -maxdepth 3 -name server.js -not -path '*/node_modules/*' | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
+          if [ -z "$P" ]; then
+            z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
+            if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::server.js tidak ditemukan di repositori. Unggah ISI zip AuraLedger (atau berkas zip-nya) ke akar repositori, lalu jalankan ulang."
+            exit 1
+          fi
+          echo "PROJ=$P" >> "$GITHUB_ENV"
+          echo "Folder proyek: $P"
       - name: Periksa sintaks server, JavaScript aplikasi, manifest, dan ikon
+        working-directory: ${{ env.PROJ }}
         run: |
           node --check server.js
           node --test tests/ledger.test.mjs
@@ -55,12 +71,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Temukan folder proyek (akar, subfolder, atau isi berkas zip)
+        run: |
+          P=""
+          [ -f server.js ] && P="."
+          if [ -z "$P" ]; then f=$(find . -maxdepth 3 -name server.js -not -path '*/node_modules/*' | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
+          if [ -z "$P" ]; then
+            z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
+            if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::server.js tidak ditemukan di repositori. Unggah ISI zip AuraLedger (atau berkas zip-nya) ke akar repositori, lalu jalankan ulang."
+            exit 1
+          fi
+          echo "PROJ=$P" >> "$GITHUB_ENV"
+          echo "Folder proyek: $P"
       - name: Audit dependensi (gagal bila ada kerentanan tinggi/kritis)
+        working-directory: ${{ env.PROJ }}
         run: |
           npm install --omit=dev --ignore-scripts
           npm audit --omit=dev --audit-level=high
       - name: Tidak boleh ada atribut event inline atau eval di aplikasi
+        working-directory: ${{ env.PROJ }}
         run: |
+          test -s public/index.html
           ! grep -nE '\son(click|change|input|submit|error|load)=' public/index.html
           ! grep -nE '\beval\(|new Function\(' public/index.html
 
