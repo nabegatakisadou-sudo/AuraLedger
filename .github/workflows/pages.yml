@@ -1,36 +1,24 @@
-name: Build AuraLedger (verifikasi + APK Android)
-
-# APK dibuat sebagai Trusted Web Activity (TWA): membuka situs AuraLedger Anda (HTTPS) memakai Chrome,
-# sehingga login Google tetap berfungsi. Server HARUS sudah ter-deploy lebih dulu.
+name: Terbitkan ke Pages
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      host:
-        description: 'Domain aplikasi tanpa https:// (contoh: ledger.domainanda.com)'
-        required: false
-      start_path:
-        description: 'Folder situs bila bukan di akar domain (contoh GitHub Pages: /AuraLedger/)'
-        required: false
-        default: '/'
-      package_id:
-        description: 'Android package ID'
-        required: false
-        default: 'id.auraledger.app'
-
+  push:
+    branches: [main]
 permissions:
   contents: read
-
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
 jobs:
-  verifikasi:
+  deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Temukan folder proyek (akar, subfolder, atau isi berkas zip)
+      - name: Temukan folder proyek
         run: |
           P=""
           [ -f server.js ] && P="."
@@ -39,164 +27,26 @@ jobs:
             z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
             if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
           fi
-          if [ -z "$P" ]; then
-            echo "::error::server.js tidak ditemukan di repositori. Unggah ISI zip AuraLedger (atau berkas zip-nya) ke akar repositori, lalu jalankan ulang."
-            exit 1
-          fi
+          [ -n "$P" ] || { echo "::error::server.js tidak ditemukan"; exit 1; }
           echo "PROJ=$P" >> "$GITHUB_ENV"
-          echo "Folder proyek: $P"
-      - name: Periksa sintaks server, JavaScript aplikasi, manifest, dan ikon
-        working-directory: ${{ env.PROJ }}
+      - name: Siapkan situs statis
         run: |
-          node --check server.js
-          node --test tests/ledger.test.mjs
-          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'));JSON.parse(require('fs').readFileSync('public/manifest.webmanifest','utf8'))"
-          test -s public/sw.js && grep -q "addEventListener('fetch'" public/sw.js || { echo '::error::public/sw.js kosong atau tanpa handler fetch'; exit 1; }
+          rm -rf _site && mkdir _site
+          cp -r "$PROJ/public/." _site/
+          rm -rf _site/.well-known
+          touch _site/.nojekyll
+          curl -fsSL --retry 3 https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js -o _site/xlsx.bundle.js
           python3 - <<'PY'
-          import json, pathlib, sys
-          h = pathlib.Path('public/index.html').read_text(encoding='utf-8')
-          a = h.index('<script>\n(() =>') + 8
-          b = h.rindex('</script>')
-          body = h[a:b]
-          if '</script>' in body:
-              sys.exit('Ada </script> di dalam JavaScript: halaman akan rusak di browser')
-          pathlib.Path('/tmp/app.js').write_text(body, encoding='utf-8')
-          m = json.load(open('public/manifest.webmanifest', encoding='utf-8'))
-          for i in m['icons']:
-              assert pathlib.Path('public', i['src']).exists(), 'ikon hilang: ' + i['src']
-          json.load(open('public/.well-known/assetlinks.json', encoding='utf-8'))
+          import re, pathlib
+          p = pathlib.Path('_site/index.html')
+          h = p.read_text(encoding='utf-8')
+          h2 = re.sub(r'<script src="https://cdn\.jsdelivr\.net/npm/xlsx-js-style@1\.2\.0/dist/xlsx\.bundle\.js"[^>]*></script>', '<script src="xlsx.bundle.js"></script>', h)
+          assert h2 != h, 'tag skrip xlsx tidak ditemukan'
+          p.write_text(h2, encoding='utf-8')
           PY
-          node --check /tmp/app.js
-
-  keamanan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
-          node-version: 20
-      - name: Temukan folder proyek (akar, subfolder, atau isi berkas zip)
-        run: |
-          P=""
-          [ -f server.js ] && P="."
-          if [ -z "$P" ]; then f=$(find . -maxdepth 3 -name server.js -not -path '*/node_modules/*' | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
-          if [ -z "$P" ]; then
-            z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
-            if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
-          fi
-          if [ -z "$P" ]; then
-            echo "::error::server.js tidak ditemukan di repositori. Unggah ISI zip AuraLedger (atau berkas zip-nya) ke akar repositori, lalu jalankan ulang."
-            exit 1
-          fi
-          echo "PROJ=$P" >> "$GITHUB_ENV"
-          echo "Folder proyek: $P"
-      - name: Audit dependensi (gagal bila ada kerentanan tinggi/kritis)
-        working-directory: ${{ env.PROJ }}
-        run: |
-          npm install --omit=dev --ignore-scripts
-          npm audit --omit=dev --audit-level=high
-      - name: Tidak boleh ada atribut event inline atau eval di aplikasi
-        working-directory: ${{ env.PROJ }}
-        run: |
-          test -s public/index.html
-          ! grep -nE '\son(click|change|input|submit|error|load)=' public/index.html
-          ! grep -nE '\beval\(|new Function\(' public/index.html
-
-  android:
-    needs: verifikasi
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      HOST: ${{ inputs.host || vars.APP_HOST }}
-      START_PATH: ${{ inputs.start_path || vars.APP_START_PATH || '/' }}
-      PACKAGE_ID: ${{ inputs.package_id || vars.APP_PACKAGE_ID || 'id.auraledger.app' }}
-      KS_ALIAS: auraledger
-      KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Validasi konfigurasi dan situs yang sudah online
-        run: |
-          [ -n "$HOST" ] || { echo "::error::Isi input 'host' (mis. akun.github.io) atau variabel repo APP_HOST. Situs harus sudah online di HTTPS."; exit 1; }
-          case "$HOST" in http*|*/*) echo "::error::HOST harus domain saja, tanpa https:// dan tanpa /"; exit 1;; esac SP="$START_PATH"; case "$SP" in /*) ;; *) SP="/$SP";; esac; case "$SP" in */) ;; *) SP="$SP/";; esac echo "SP=$SP" >> "$GITHUB_ENV" for p in manifest.webmanifest icon-512.png; do curl -fsS --max-time 20 "https://$HOST$SP$p" -o /dev/null || { echo "::error::https://$HOST$SP$p tidak dapat diakses. Terbitkan situsnya lebih dulu (workflow Pages) lalu periksa input host dan start_path."; exit 1; } done - uses: actions/setup-java@v4 with: distribution: temurin java-version: 17 - uses: android-actions/setup-android@v3 - name: Pasang Bubblewrap dan atur lokasi JDK/SDK run: | npm install -g @bubblewrap/cli@1 mkdir -p "$HOME/.bubblewrap" printf '{"jdkPath":"%s","androidSdkPath":"%s"}' "$JAVA_HOME" "$ANDROID_HOME" > "$HOME/.bubblewrap/config.json" - name: Siapkan kunci penandatangan dan twa-manifest.json run: | mkdir -p twa if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then echo "$KS_B64" | base64 -d > twa/android.keystore PW="$KS_PASS"; echo "GENERATED=0" >> "$GITHUB_ENV" else PW=$(openssl rand -hex 12); echo "::add-mask::$PW" keytool -genkeypair -v -keystore twa/android.keystore -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -storepass "$PW" -keypass "$PW" -dname "CN=AuraLedger, O=AuraLedger, C=ID" > /dev/null 2>&1 printf 'SIMPAN BERKAS INI DI TEMPAT AMAN.\nKata sandi keystore: %s\nAlias: %s\nAgar pembaruan aplikasi memakai kunci yang sama, jadikan secret ANDROID_KEYSTORE_PASSWORD = kata sandi ini dan ANDROID_KEYSTORE_BASE64 = isi base64 dari android.keystore.\n' "$PW" "$KS_ALIAS" > twa/SIMPAN-INI-kunci-penandatangan.txt echo "GENERATED=1" >> "$GITHUB_ENV" fi echo "::add-mask::$PW"; echo "KSPW=$PW" >> "$GITHUB_ENV" case "$GITHUB_REF" in refs/tags/v*) VN="${GITHUB_REF_NAME#v}";; *) VN="1.0.${GITHUB_RUN_NUMBER}";; esac
-          cat > twa/twa-manifest.json <<EOF
-          {
-            "packageId": "${PACKAGE_ID}",
-            "host": "${HOST}",
-            "name": "AuraLedger",
-            "launcherName": "AuraLedger",
-            "display": "standalone",
-            "orientation": "default",
-            "themeColor": "#17110E",
-            "themeColorDark": "#17110E",
-            "navigationColor": "#17110E",
-            "navigationColorDark": "#17110E",
-            "navigationDividerColor": "#17110E",
-            "navigationDividerColorDark": "#17110E",
-            "backgroundColor": "#17110E",
-            "enableNotifications": false,
-            "startUrl": "${SP}",
-            "iconUrl": "https://${HOST}${SP}icon-512.png",
-            "maskableIconUrl": "https://${HOST}${SP}icon-512.png",
-            "splashScreenFadeOutDuration": 300,
-            "signingKey": { "path": "./android.keystore", "alias": "${KS_ALIAS}" },
-            "appVersionName": "${VN}",
-            "appVersionCode": ${GITHUB_RUN_NUMBER},
-            "shortcuts": [],
-            "generatorApp": "bubblewrap-cli",
-            "webManifestUrl": "https://${HOST}${SP}manifest.webmanifest",
-            "fallbackType": "customtabs",
-            "features": {},
-            "alphaDependencies": { "enabled": false },
-            "enableSiteSettingsShortcut": true,
-            "isChromeOSOnly": false,
-            "isMetaQuest": false,
-            "fullScopeUrl": "https://${HOST}${SP}",
-            "minSdkVersion": 21
-          }
-          EOF
-          python3 -m json.tool twa/twa-manifest.json > /dev/null
-
-      - name: Bangun proyek Android dan APK
-        working-directory: twa
-        env:
-          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ env.KSPW }}
-          BUBBLEWRAP_KEY_PASSWORD: ${{ env.KSPW }}
-        run: |
-          bubblewrap update --skipVersionUpgrade
-          bubblewrap build --skipPwaValidation
-          ls -la *.apk *.aab
-
-      - name: Ringkasan hasil
-        working-directory: twa
-        run: |
-          FP=$(keytool -list -v -keystore android.keystore -alias "$KS_ALIAS" -storepass "$KSPW" | awk '/SHA256:/{print $2; exit}')
-          {
-            echo "### APK siap diunduh dari bagian Artifacts di bawah halaman ini"
-            [ "$GENERATED" = "1" ] && echo "Kunci penandatangan BARU dibuat otomatis. Unduh juga artifact **kunci-penandatangan-SIMPAN** dan simpan baik-baik (dibutuhkan untuk pembaruan berikutnya)."
-            echo "Situs: https://${HOST}${SP}"
-            echo ""
-            echo "Agar tampil layar penuh tanpa bilah alamat, domain harus menyajikan /.well-known/assetlinks.json di akarnya (butuh domain sendiri atau repo akun.github.io). Pada GitHub Pages proyek biasa, aplikasi tetap berjalan tetapi bilah alamat kecil tetap tampil."
-            echo '```json'
-            echo "[{\"relation\":[\"delegate_permission/common.handle_all_urls\"],\"target\":{\"namespace\":\"android_app\",\"package_name\":\"${PACKAGE_ID}\",\"sha256_cert_fingerprints\":[\"${FP}\"]}}]"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: auraledger-android
-          path: |
-            twa/app-release-signed.apk
-            twa/app-release-bundle.aab
-          retention-days: 30
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        if: env.GENERATED == '1'
-        with:
-          name: kunci-penandatangan-SIMPAN
-          path: |
-            twa/android.keystore
-            twa/SIMPAN-INI-kunci-penandatangan.txt
-          retention-days: 90
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
