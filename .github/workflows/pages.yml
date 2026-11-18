@@ -1,15 +1,22 @@
-name: Terbitkan ke Pages
+name: Terbitkan AuraLedger ke GitHub Pages (aplikasi web yang bisa dipasang di HP/laptop)
+
+# Hasil: https://<akun>.github.io/<repo>/ -> buka di Chrome/Edge, lalu "Pasang aplikasi / Tambahkan ke layar utama".
+# Data tersimpan di perangkat Anda (tanpa server). Login Google & sinkron cloud butuh server terpisah.
+# Prasyarat: Settings -> Pages -> Source = "GitHub Actions". Repositori privat memerlukan paket GitHub berbayar untuk Pages.
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
 concurrency:
   group: pages
   cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -18,7 +25,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - name: Temukan folder proyek
+      - name: Temukan folder proyek (akar, subfolder, atau isi berkas zip)
         run: |
           P=""
           [ -f server.js ] && P="."
@@ -27,9 +34,13 @@ jobs:
             z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
             if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
           fi
-          [ -n "$P" ] || { echo "::error::server.js tidak ditemukan"; exit 1; }
+          if [ -z "$P" ]; then
+            echo "::error::server.js tidak ditemukan di repositori. Unggah ISI zip AuraLedger (atau berkas zip-nya) ke akar repositori, lalu jalankan ulang."
+            exit 1
+          fi
           echo "PROJ=$P" >> "$GITHUB_ENV"
-      - name: Siapkan situs statis
+          echo "Folder proyek: $P"
+      - name: Siapkan situs statis (pustaka Excel disertakan agar ekspor jalan offline)
         run: |
           rm -rf _site && mkdir _site
           cp -r "$PROJ/public/." _site/
@@ -41,9 +52,10 @@ jobs:
           p = pathlib.Path('_site/index.html')
           h = p.read_text(encoding='utf-8')
           h2 = re.sub(r'<script src="https://cdn\.jsdelivr\.net/npm/xlsx-js-style@1\.2\.0/dist/xlsx\.bundle\.js"[^>]*></script>', '<script src="xlsx.bundle.js"></script>', h)
-          assert h2 != h, 'tag skrip xlsx tidak ditemukan'
+          assert h2 != h, 'tag skrip xlsx tidak ditemukan di index.html'
           p.write_text(h2, encoding='utf-8')
           PY
+          test -s _site/xlsx.bundle.js && test -s _site/index.html && test -s _site/sw.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
