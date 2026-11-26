@@ -36,7 +36,7 @@ jobs:
           [ -f server.js ] && P="."
           if [ -z "$P" ]; then f=$(find . -maxdepth 3 -name server.js -not -path '*/node_modules/*' | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
           if [ -z "$P" ]; then
-            z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
+            z=$(find . -maxdepth 2 -iname '*.zip' | sort -V | tail -n1)
             if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
           fi
           if [ -z "$P" ]; then
@@ -81,7 +81,7 @@ jobs:
           [ -f server.js ] && P="."
           if [ -z "$P" ]; then f=$(find . -maxdepth 3 -name server.js -not -path '*/node_modules/*' | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
           if [ -z "$P" ]; then
-            z=$(find . -maxdepth 2 -iname '*.zip' | head -n1)
+            z=$(find . -maxdepth 2 -iname '*.zip' | sort -V | tail -n1)
             if [ -n "$z" ]; then mkdir -p _proyek && unzip -q -o "$z" -d _proyek; f=$(find _proyek -maxdepth 3 -name server.js | head -n1); [ -n "$f" ] && P=$(dirname "$f"); fi
           fi
           if [ -z "$P" ]; then
@@ -131,7 +131,17 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      - name: Siapkan Android SDK bawaan runner, terima lisensi, pasang komponen
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKM=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -n1)
+          [ -n "$SDKM" ] || { echo "::error::sdkmanager tidak ditemukan di $ANDROID_HOME/cmdline-tools"; exit 1; }
+          CT="$(dirname "$(dirname "$SDKM")")"
+          [ -e "$ANDROID_HOME/cmdline-tools/latest" ] || ln -sfn "$CT" "$ANDROID_HOME/cmdline-tools/latest" 2>/dev/null || sudo ln -sfn "$CT" "$ANDROID_HOME/cmdline-tools/latest"
+          { echo "ANDROID_HOME=$ANDROID_HOME"; echo "ANDROID_SDK_ROOT=$ANDROID_HOME"; } >> "$GITHUB_ENV"
+          yes | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
+          "$SDKM" --sdk_root="$ANDROID_HOME" "platform-tools" "build-tools;34.0.0" "build-tools;35.0.0" "platforms;android-34" "platforms;android-35" > /dev/null
+          echo "Android SDK siap di $ANDROID_HOME"
 
       - name: Pasang Bubblewrap dan atur lokasi JDK/SDK
         run: |
