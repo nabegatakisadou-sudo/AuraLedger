@@ -201,15 +201,19 @@ jobs:
           EOF
           python3 -m json.tool twa/twa-manifest.json > /dev/null
 
-      - name: Bangun proyek Android dan APK
+      - name: Bangun proyek Android dan APK (Gradle + apksigner)
         working-directory: twa
-        env:
-          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ env.KSPW }}
-          BUBBLEWRAP_KEY_PASSWORD: ${{ env.KSPW }}
         run: |
           bubblewrap update --skipVersionUpgrade
-          bubblewrap build --skipPwaValidation
-          ls -la *.apk *.aab
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          UNSIGNED=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          [ -n "$UNSIGNED" ] || { echo "::error::APK hasil build tidak ditemukan di app/build/outputs/apk/release"; exit 1; }
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign --ks android.keystore --ks-key-alias "$KS_ALIAS" --ks-pass env:KSPW --key-pass env:KSPW --out app-release-signed.apk aligned.apk
+          "$BT/apksigner" verify app-release-signed.apk
+          ls -la app-release-signed.apk
 
       - name: Ringkasan hasil
         working-directory: twa
@@ -231,7 +235,6 @@ jobs:
           name: auraledger-android
           path: |
             twa/app-release-signed.apk
-            twa/app-release-bundle.aab
           retention-days: 30
           if-no-files-found: error
 
